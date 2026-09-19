@@ -25,8 +25,8 @@ def authenticate(gsa: GSAClient, username: str, password: str,
             raise GSAError(f"2FA required but missing dsid/GsIdMS in spd: keys={list(spd)}")
 
         if au == "trustedDeviceSecondaryAuth":
-            gsa.trigger_trusted_factor(dsid, idms)
-            gsa.submit_trusted_factor(twofa("trusted"), dsid, idms)
+            kind = "trusted" if gsa.trigger_trusted_factor(dsid, idms) else "trusted-manual"
+            gsa.submit_trusted_factor(twofa(kind), dsid, idms)
         else:
             gsa.trigger_sms_factor(dsid, idms)
             gsa.submit_sms_factor(twofa("sms"), dsid, idms)

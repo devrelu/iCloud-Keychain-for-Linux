@@ -35,13 +35,13 @@ def _twofa_prompt(kind: str) -> str:
     return ui.ask("6-digit code: ")
 
 
-def _mint_pet(device, anisette, username: str, password: str) -> str:
+def _mint_pet(device, anisette, username: str, password: str) -> tuple[str, int | None]:
     """Mint a fresh GSA PET (password-equivalent token) for escrowproxy Basic auth. Silent on an
     already-trusted device (no 2FA re-prompt). Kept fresh per phase because the PET is short-lived."""
     gsa = GSAClient(device, anisette)
     spd = auth.authenticate(gsa, username, password, _twofa_prompt)
-    _, pet, _ = auth.extract_pet(spd)
-    return pet
+    _, pet, expiry = auth.extract_pet(spd)
+    return pet, expiry
 
 
 def _describe_bottle(b: dict) -> str:
@@ -199,13 +199,23 @@ def cmd_login(args) -> int:
         return 2
     password = ui.secret("Password: ")
 
-    record: dict = {}
+    record: dict = {"username": username}
     if prior.get("octagon", {}).get("peer_id"):
         record["octagon"] = prior["octagon"]
     if prior.get("mme", {}).get("cloudKitUserId"):
         record.setdefault("mme", {})["cloudKitUserId"] = prior["mme"]["cloudKitUserId"]
+    if prior.get("webauth"):
+        record["webauth"] = prior["webauth"]   # reuse the saved 2FA trust token if still valid
     if not args.no_save_password:
         record["password"] = password   # in the keyring-encrypted session; enables silent refresh
+
+    try:
+        _ensure_web_session(record, interactive=True, password=password)
+        # Bank the trust token now so a later failure in this login need not re-prompt 2FA.
+        session.save(record)
+    except Exception as e:  # noqa: BLE001 - never let the 2FA bootstrap abort sign-in
+        log.warning("web-session 2FA bootstrap failed: %s", e)
+        ui.warn(f"could not pre-clear 2FA via the web session: {e}")
 
     # SRP login + mint the mmeAuthToken (the one hop that needs the password).
     mme_ok = False
@@ -525,7 +535,7 @@ def _join_and_sync(s: dict, device, anisette, username: str, password: str) -> i
         ui.step("Discovering escrow bottles...")
         # A PET here only lists device metadata via GETRECORDS (non-destructive, spends no
         # attempt) so the user can see WHICH device each bottle belongs to before choosing.
-        list_pet = _mint_pet(device, anisette, username, password)
+        list_pet, list_pet_expiry = _mint_pet(device, anisette, username, password)
         bottles = client.list_recoverable_bottles(escrow_host, username, list_pet, warn=ui.warn)
     except (OctagonError, CloudKitError, GSAError, AnisetteError) as e:
         ui.err(str(e))
@@ -549,10 +559,11 @@ def _join_and_sync(s: dict, device, anisette, username: str, password: str) -> i
                "run `icp login` again to retry the keychain join.")
         return 0
 
-    # Mint a fresh PET right before the irreversible recovery so it can't expire during the
-    # selection/confirmation delay above.
     try:
-        pet = _mint_pet(device, anisette, username, password)
+        if list_pet_expiry and list_pet_expiry - time.time() * 1000 > 60_000:
+            pet = list_pet
+        else:
+            pet, _ = _mint_pet(device, anisette, username, password)
     except (GSAError, AnisetteError) as e:
         ui.err(f"sign-in failed: {e}")
         return 1
@@ -635,7 +646,7 @@ def cmd_sync(args) -> int:
         lock.close()
 
 
-def _ensure_web_session(s: dict, *, interactive: bool):
+def _ensure_web_session(s: dict, *, interactive: bool, password: str | None = None):
     """Reach a valid idmsa web session (auth/webauth.py). Reuses a saved trust token when
     possible; otherwise signs in with the saved password and prompts for 2FA once. Returns
     (WebAuthSession, account_data)."""
@@ -657,7 +668,8 @@ def _ensure_web_session(s: dict, *, interactive: bool):
             account_data = None
 
     if account_data is None:
-        username, password = s.get("username"), s.get("password")
+        username = s.get("username")
+        password = password or s.get("password")
         if not username or not password:
             raise webauth.WebAuthError(
                 "no saved Apple ID password for the web session - run `icp login` "

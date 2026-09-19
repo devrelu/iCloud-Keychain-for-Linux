@@ -21,10 +21,7 @@ ACCOUNT_SETTINGS_URL = "https://setup.icloud.com/setup/get_account_settings"
 
 # AOSKit/accountsd identity for the iCloud setup endpoints (distinct from the GSA akd UA).
 ICLOUD_USER_AGENT = "com.apple.iCloudHelper/282 CFNetwork/1408.0.4 Darwin/22.5.0"
-ICLOUD_CLIENT_INFO = (
-    "<MacBookPro18,3> <Mac OS X;13.4.1;22F8> "
-    "<com.apple.AOSKit/282 (com.apple.accountsd/113)>"
-)
+ICLOUD_CLIENT_INFO = "<MacBookPro13,2> <macOS;14.4;23E214> <com.apple.AOSKit/282 (com.apple.accountsd/113)>"
 
 
 class ICloudError(AppleError):

@@ -102,12 +102,13 @@ class GSAClient:
         logger.debug("GSA spd top-level keys: %s", list(spd))
         return complete, spd
 
-    def trigger_trusted_factor(self, dsid: str, idms_token: str) -> None:
-        requests.get(
+    def trigger_trusted_factor(self, dsid: str, idms_token: str) -> bool:
+        resp = requests.get(
             "https://gsa.apple.com/auth/verify/trusteddevice",
             headers=self._twofa_headers(dsid, idms_token),
             verify=False, timeout=10,
         )
+        return resp.ok
 
     def submit_trusted_factor(self, code: str, dsid: str, idms_token: str) -> None:
         h = self._twofa_headers(dsid, idms_token)
@@ -149,7 +150,7 @@ class GSAClient:
             "X-Apple-Identity-Token": identity_token,
             "X-Apple-App-Info": "com.apple.gs.xcode.auth",
             "X-Xcode-Version": "11.2 (11B41)",
-            "X-Mme-Client-Info": const.GSA_CLIENT_INFO,
+            "X-Mme-Client-Info": const.GSA_2FA_CLIENT_INFO,
         }
         h.update(identity_headers(self.device, self.anisette))
         return h
