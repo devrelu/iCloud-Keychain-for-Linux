@@ -1,14 +1,16 @@
-"""Native-messaging host for the browser autofill extension. Speaks Chrome's native-messaging
-protocol on stdin/stdout (4-byte LE length prefix + UTF-8 JSON) and answers domain queries from
-the decrypted vault, read-only.
+"""Local HTTP service for the browser autofill extension.
 
-Protocol (JSON):
+The service listens only on ``127.0.0.1`` (port 8765 by default). Send a JSON command to
+``POST /v1/request``:
+
   -> {"cmd":"ping"}                              <- {"ok":true,"count":N}
   -> {"cmd":"match","domain":"login.example.com"} <- {"ok":true,"credentials":[{...}]}
   -> {"cmd":"totp","domain":...,"username":...}   <- {"ok":true,"totp":{"code":...}}
 
 A credential's one-time-code secret never crosses this protocol: `match` carries the code
 generated at request time, and `totp` re-generates it when the browser's copy has rolled over.
+
+The native-messaging framing helpers remain available for callers migrating from the old host.
 """
 
 from __future__ import annotations
@@ -16,10 +18,13 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import json
+import os
 import plistlib
 import re
 import struct
 import sys
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .. import totp as totp_codes
 
@@ -379,12 +384,61 @@ def handle(request: dict, store: CredentialStore, aliases: list | None = None) -
 
 def serve(store: CredentialStore, *, aliases: list | None = None,
          instream=None, outstream=None) -> None:
-    """Blocking native-messaging loop. Returns when the extension disconnects (EOF)."""
+    """Blocking native-messaging loop, retained for callers using the legacy protocol."""
     while True:
         request = read_message(instream)
         if request is None:
             return
         write_message(handle(request, store, aliases), outstream)
+
+
+def make_http_handler(store: CredentialStore, aliases: list | None = None):
+    """Create the loopback HTTP request handler for the browser extension."""
+    class VaultRequestHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, format, *args) -> None:
+            # Requests include passwords in their responses; never log them.
+            return
+
+        def _write_json(self, status: HTTPStatus, payload: dict) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self) -> None:
+            if self.path != "/v1/request":
+                self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
+                return
+            try:
+                content_length = int(self.headers.get("Content-Length", ""))
+                if not 0 <= content_length <= 65536:
+                    raise ValueError
+                request = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                if not isinstance(request, dict):
+                    raise ValueError
+            except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+                self._write_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid JSON request"})
+                return
+            self._write_json(HTTPStatus.OK, handle(request, store, aliases))
+
+    return VaultRequestHandler
+
+
+def serve_http(store: CredentialStore, *, aliases: list | None = None,
+               port: int = 8765) -> None:
+    """Serve vault requests over HTTP on the IPv4 loopback interface."""
+    if not 1 <= port <= 65535:
+        raise ValueError("ICP_VAULT_PORT must be between 1 and 65535")
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_http_handler(store, aliases))
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
 
 
 def _maybe_trigger_sync() -> None:
@@ -435,7 +489,12 @@ def main(argv=None) -> int:
         aliases = load_aliases()
     except Exception:
         aliases = []
-    serve(store, aliases=aliases)
+    try:
+        port = int(os.environ.get("ICP_VAULT_PORT", "8765"))
+        serve_http(store, aliases=aliases, port=port)
+    except (OSError, ValueError) as exc:
+        print(f"unable to start vault HTTP service: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
